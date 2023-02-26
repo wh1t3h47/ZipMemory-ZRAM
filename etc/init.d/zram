@@ -1,0 +1,75 @@
+#!/bin/env bash
+# Author: Antonio Galea <antonio.galea@gmail.com>
+#
+# Thanks to Przemysław Tomczyk for suggesting swapoff parallelization
+# Modified by wh1t3h47 (Antonio Martos Harres) to provide fine tuning using sysctl
+# Distributed under the GPL version 3 or later, see terms at
+# https://gnu.org/licenses/gpl-3.0.txt
+
+### BEGIN INIT INFO
+# Provides:          zram
+# Required-Start:    $local_fs
+# Required-Stop:     $local_fs
+# Default-Start:     S
+# Default-Stop:      0 1 6
+# Short-Description: Use compressed RAM as in-memory swap
+# Description:       Use compressed RAM as in-memory swap
+### END INIT INFO
+
+# https://unix.stackexchange.com/questions/594817/why-does-zram-occupy-much-more-memory-compared-to-its-compressed-value
+FRACTION=100
+# Zstd is heavier on CPU, lzo is the best tradeof (default)
+COMPRESSION_ALG='zstd'
+#FRACTION=100
+	MEMORY=$(perl -ne '/^MemTotal:\s+(\d+)/ && print $1*1024' < /proc/meminfo)
+	CPUS=$(nproc)
+SIZE=$((MEMORY * FRACTION / 100 / CPUS))
+	case "$1" in
+	start)
+        # For more recent Linux kernels, I think version > 4.8, 200 is acceptable
+        # This option will control how early the system uses zram, too early and it
+        # will use CPU unnecessarily, too late and it will not touch fill the ram
+        # before touching zram, I leave 40 because works the best for me
+        sysctl -w vm.swappiness=40
+        # https://haydenjames.io/linux-performance-almost-always-add-swap-part2-zram/
+        # These were also optimized for 8GB of RAM
+        sysctl -w vm.vfs_cache_pressure=200
+        sysctl -w vm.dirty_background_ratio=30
+        sysctl -w vm.dirty_ratio=80
+        # Makes Kernel kill a process if it starts allocating way too much ram
+        sysctl -w vm.oom_kill_allocating_task=1
+	param=$(modinfo zram | grep num_devices | cut -f2 -d: | tr -d ' ')
+	modprobe zram $param=${CPUS}
+
+for n in $(seq $CPUS)
+	do
+i=$((n - 1))
+	echo ${COMPRESSION_ALG} > /sys/block/zram${i}/comp_algorithm
+	echo ${SIZE} > /sys/block/zram${i}/disksize
+       	mkswap /dev/zram${i}
+	swapon /dev/zram${i} --priority 100
+	done
+	;;
+	stop)
+for n in $(seq ${CPUS})
+	do
+i=$((n - 1))
+	swapoff /dev/zram${i} && echo "zram: disabled disk $n of $CPUS" &
+	done
+
+	wait
+	sleep .5
+	modprobe --remove zram
+        sysctl -w vm.swappiness=60
+	sysctl -w vm.vfs_cache_pressure=100
+        sysctl -w vm.dirty_background_ratio=10
+        sysctl -w vm.dirty_ratio=20
+	;;
+	*)
+	echo "Usage: $(basename $0) (start | stop)"
+	exit 1
+	;;
+	esac
+
+# End of file
+
